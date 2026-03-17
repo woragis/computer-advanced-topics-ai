@@ -9,7 +9,43 @@ from app.services.logging import logger
 router = APIRouter()
 
 
-@router.post("/analyze", response_model=AnalysisResult)
+@router.post(
+    "/analyze",
+    response_model=AnalysisResult,
+    summary="Analyze Article or Text",
+    description=(
+        "Analyze a news article (by URL) or raw text for factual claims, fact-check them, and score credibility.\n\n"
+        "- Provide either a URL or text (or both).\n"
+        "- Returns extracted claims, fact-check results, credibility score, and explanation."
+    ),
+    response_description="Analysis result with claims, credibility score, and explanation.",
+    responses={
+        200: {
+            "description": "Analysis completed successfully.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "raw_text": "...article text...",
+                        "credibility_score": 0.82,
+                        "verdict": "RELIABLE",
+                        "claims": [
+                            {"text": "The Eiffel Tower is in Paris.", "is_verified": True,
+                                "confidence": 0.9, "source_url": "https://factcheck.com/eiffel"}
+                        ],
+                        "sources": [
+                            {"url": "https://example.com", "domain": "example.com",
+                                "reputation_score": 0.95, "is_known_satire": False}
+                        ],
+                        "explanation": "The article is mostly factual and cites reputable sources."
+                    }
+                }
+            }
+        },
+        400: {"description": "Missing input (url or text)."},
+        422: {"description": "Processing error (scraping, claim extraction, fact-checking, LLM)."},
+        500: {"description": "Internal server error."}
+    }
+)
 async def analyze(request: AnalysisRequest):
     logger.info(
         f"Analyze endpoint called. url={request.url} text_len={len(request.text) if request.text else 0}")

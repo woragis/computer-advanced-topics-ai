@@ -6,8 +6,32 @@ from app.services.logging import logger
 
 app = FastAPI(
     title="FakeRadar AI Server",
-    description="NLP pipeline for fake news detection",
-    version="1.0.0"
+    description="""
+    FakeRadar AI Server provides NLP-powered fake news detection, claim extraction, fact-checking, and credibility scoring.
+    
+    ## Features
+    - Analyze news articles or text for factual claims
+    - Fact-check claims using external APIs
+    - Score credibility and provide human-readable explanations
+    
+    ## Usage
+    - Use `/ai/analyze` to analyze a URL or text
+    - Use `/ai/health` to check service status
+    
+    ## Error Codes
+    - 400: Bad request (missing input)
+    - 422: Processing error (scraping, claim extraction, fact-checking, LLM)
+    - 500: Internal server error
+    """,
+    version="1.0.0",
+    contact={
+        "name": "FakeRadar Team",
+        "email": "support@fakeradar.ai"
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT"
+    }
 )
 
 
