@@ -2,7 +2,30 @@ import anthropic
 from app.models.schemas import ClaimResult, AnalysisResult, Verdict
 from app.config import settings
 
-client = anthropic.Anthropic(api_key=settings.llm_api_key)
+client = anthropic.Anthropic(api_key=settings.llm_api_key) if settings.llm_api_key else None
+
+
+def _mock_score(text: str, claims: list[ClaimResult]) -> AnalysisResult:
+    verified_count = sum(1 for c in claims if c.is_verified)
+    total_claims = len(claims) or 1
+    score = round(verified_count / total_claims, 2)
+    if score >= 0.7:
+        verdict = Verdict.RELIABLE
+    elif score >= 0.4:
+        verdict = Verdict.SUSPICIOUS
+    else:
+        verdict = Verdict.FAKE
+    return AnalysisResult(
+        raw_text=text,
+        credibility_score=score,
+        verdict=verdict,
+        claims=claims,
+        sources=[],
+        explanation=(
+            "Mock analysis (AI_MOCK_LLM enabled): score based on claim verification ratio. "
+            "Set LLM_API_KEY and AI_MOCK_LLM=false for real LLM scoring."
+        ),
+    )
 
 
 async def score_credibility(text: str, claims: list[ClaimResult]) -> AnalysisResult:
@@ -10,9 +33,8 @@ async def score_credibility(text: str, claims: list[ClaimResult]) -> AnalysisRes
     Use LLM to assign a credibility score and verdict
     based on the article text and claim verification results.
     """
-    verified_count = sum(1 for c in claims if c.is_verified)
-    total_claims = len(claims) or 1
-    base_score = verified_count / total_claims
+    if settings.ai_mock_llm or not settings.llm_api_key:
+        return _mock_score(text, claims)
 
     claim_summary = "\n".join(
         f"- {'✅' if c.is_verified else '❌'} {c.text}" for c in claims
