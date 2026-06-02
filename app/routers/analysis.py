@@ -5,6 +5,7 @@ from app.services.claim_extractor import extract_claims
 from app.services.fact_checker import fact_check_claims
 from app.services.credibility_scorer import score_credibility
 from app.services.logging import logger
+from app.services.log_publisher import publish_log
 
 router = APIRouter()
 
@@ -49,6 +50,15 @@ router = APIRouter()
 async def analyze(request: AnalysisRequest):
     logger.info(
         f"Analyze endpoint called. url={request.url} text_len={len(request.text) if request.text else 0}")
+    await publish_log(
+        level="info",
+        event="analysis.started",
+        message="Analyze request received",
+        metadata={
+            "hasUrl": bool(request.url),
+            "textLen": len(request.text) if request.text else 0,
+        },
+    )
     if not request.has_input():
         logger.warning("Analyze endpoint: missing input.")
         raise HTTPException(status_code=400, detail="Provide 'url' or 'text'")
@@ -88,4 +98,14 @@ async def analyze(request: AnalysisRequest):
             status_code=422, detail="Failed to score credibility")
 
     logger.info("Analyze endpoint completed successfully.")
+    await publish_log(
+        level="info",
+        event="analysis.completed",
+        message="Analyze request completed",
+        metadata={
+            "verdict": result.verdict.value,
+            "credibilityScore": result.credibility_score,
+            "claimsCount": len(result.claims),
+        },
+    )
     return result

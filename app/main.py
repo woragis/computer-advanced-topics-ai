@@ -1,10 +1,22 @@
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.routers import analysis, health
 from app.services.logging import logger
+from app.services.log_publisher import close_log_publisher, init_log_publisher
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_log_publisher()
+    yield
+    await close_log_publisher()
+
 
 app = FastAPI(
+    lifespan=lifespan,
     title="FakeRadar AI Server",
     description="""
     FakeRadar AI Server provides NLP-powered fake news detection, claim extraction, fact-checking, and credibility scoring.
