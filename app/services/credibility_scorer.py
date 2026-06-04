@@ -1,81 +1,149 @@
+import json
+import re
+from datetime import datetime, timezone
+
 import anthropic
+
 from app.models.schemas import ClaimResult, AnalysisResult, Verdict
 from app.config import settings
+from app.services.source_reputation import get_domain_reputation
 
 client = anthropic.Anthropic(api_key=settings.llm_api_key) if settings.llm_api_key else None
 
 
-def _mock_score(text: str, claims: list[ClaimResult]) -> AnalysisResult:
-    verified_count = sum(1 for c in claims if c.is_verified)
-    total_claims = len(claims) or 1
-    score = round(verified_count / total_claims, 2)
-    if score >= 0.7:
+def _claim_status(c: ClaimResult) -> str:
+    if c.is_verified:
+        return "confirmed"
+    if c.confidence <= 0.35:
+        return "contradicted"
+    return "unknown"
+
+
+def _heuristic_score(
+    claims: list[ClaimResult], source_url: str | None
+) -> tuple[float, Verdict]:
+    if not claims:
+        rep = get_domain_reputation(source_url)
+        score = min(0.75, rep)
+        verdict = Verdict.RELIABLE if score >= 0.7 else Verdict.SUSPICIOUS
+        return round(score, 2), verdict
+
+    confirmed = sum(1 for c in claims if _claim_status(c) == "confirmed")
+    contradicted = sum(1 for c in claims if _claim_status(c) == "contradicted")
+    unknown = len(claims) - confirmed - contradicted
+
+    rep = get_domain_reputation(source_url)
+    ratio = confirmed / len(claims)
+    score = ratio * 0.55 + (unknown / len(claims)) * 0.35 + rep * 0.25
+    score -= (contradicted / len(claims)) * 0.5
+    score = max(0.0, min(1.0, score))
+
+    if contradicted >= 2 or (contradicted >= 1 and confirmed == 0):
+        verdict = Verdict.FAKE
+    elif score >= 0.65 and contradicted == 0:
         verdict = Verdict.RELIABLE
     elif score >= 0.4:
         verdict = Verdict.SUSPICIOUS
     else:
         verdict = Verdict.FAKE
+
+    return round(score, 2), verdict
+
+
+def _mock_score(
+    text: str, claims: list[ClaimResult], source_url: str | None
+) -> AnalysisResult:
+    score, verdict = _heuristic_score(claims, source_url)
+    from app.services.fact_checker import build_source_results
+
     return AnalysisResult(
         raw_text=text,
         credibility_score=score,
         verdict=verdict,
         claims=claims,
-        sources=[],
+        sources=build_source_results(source_url),
         explanation=(
-            "Mock analysis (AI_MOCK_LLM enabled): score based on claim verification ratio. "
-            "Set LLM_API_KEY and AI_MOCK_LLM=false for real LLM scoring."
+            "Análise heurística (sem LLM ou AI_MOCK_LLM): score combina veículo, "
+            "alegações confirmadas e inconclusivas. Ausência de fact-check não significa falso."
         ),
     )
 
 
-async def score_credibility(text: str, claims: list[ClaimResult]) -> AnalysisResult:
-    """
-    Use LLM to assign a credibility score and verdict
-    based on the article text and claim verification results.
-    """
+def _parse_llm_json(raw: str) -> dict:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
+async def score_credibility(
+    text: str,
+    claims: list[ClaimResult],
+    source_url: str | None = None,
+) -> AnalysisResult:
+    from app.services.fact_checker import build_source_results
+
+    sources = build_source_results(source_url)
+    rep = get_domain_reputation(source_url)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     if settings.ai_mock_llm or not settings.llm_api_key:
-        return _mock_score(text, claims)
+        return _mock_score(text, claims, source_url)
 
     claim_summary = "\n".join(
-        f"- {'✅' if c.is_verified else '❌'} {c.text}" for c in claims
+        f"- [{_claim_status(c).upper()}] {c.text}" for c in claims
     )
 
-    prompt = f"""You are a misinformation analyst. Given the article excerpt and claim verification results below, provide:
-1. A credibility score between 0.0 (completely fake) and 1.0 (fully credible)
-2. A verdict: RELIABLE, SUSPICIOUS, or FAKE
-3. A 2-sentence explanation for a general audience
+    prompt = f"""You are a misinformation analyst. Today's reference date is {today} (UTC).
+Score news REPORTING from established outlets — do not mark as fake solely because fact-check APIs returned no match.
 
-Article excerpt (first 1000 chars):
-{text[:1000]}
+Rules:
+- "unknown" claims were NOT disproven; do not treat them as false.
+- Photo caption dates are metadata, not proof the story is fabricated.
+- If the source domain is a major news site (e.g. g1.globo.com) and nothing was contradicted, prefer RELIABLE or SUSPICIOUS over FAKE.
+- Reserve FAKE for clear fabrication or contradicted core facts.
+- Write the explanation in Portuguese (Brazil).
 
-Claim verification results:
-{claim_summary}
+Source URL: {source_url or "text only"}
+Source reputation (0-1): {rep:.2f}
 
-Respond ONLY in this JSON format (no markdown):
+Article excerpt (first 1500 chars):
+{text[:1500]}
+
+Claim verification:
+{claim_summary or "(no individual claims extracted)"}
+
+Respond ONLY with JSON (no markdown):
 {{
-  \"credibility_score\": 0.0,
-  \"verdict\": \"SUSPICIOUS\",
-  \"explanation\": "..."
+  "credibility_score": 0.75,
+  "verdict": "RELIABLE",
+  "explanation": "..."
 }}"""
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}]
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
     )
 
-    import json
-    llm_output = json.loads(message.content[0].text)
+    llm_output = _parse_llm_json(message.content[0].text)
 
     score = float(llm_output["credibility_score"])
     verdict_str = llm_output["verdict"]
     explanation = llm_output["explanation"]
 
+    contradicted = sum(1 for c in claims if _claim_status(c) == "contradicted")
+    if rep >= 0.85 and contradicted == 0 and score < 0.55:
+        score = max(score, 0.62)
+
+    score = max(0.0, min(1.0, score))
+
     return AnalysisResult(
         raw_text=text,
-        credibility_score=score,
+        credibility_score=round(score, 2),
         verdict=Verdict(verdict_str),
         claims=claims,
-        sources=[],
-        explanation=explanation
+        sources=sources,
+        explanation=explanation,
     )

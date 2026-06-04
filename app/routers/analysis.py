@@ -63,15 +63,19 @@ async def analyze(request: AnalysisRequest):
         logger.warning("Analyze endpoint: missing input.")
         raise HTTPException(status_code=400, detail="Provide 'url' or 'text'")
 
-    # Step 1 — Get raw text
-    text = request.text
-    if request.url and not text:
+    # Step 1 — Get raw text (URL always wins: scrape article, ignore optional user note)
+    text: str | None = None
+    if request.url:
         try:
             text = await scrape_url(request.url)
         except Exception as e:
             logger.error(f"Error scraping URL {request.url}: {e}")
             raise HTTPException(
                 status_code=422, detail="Failed to extract text from URL")
+    elif request.text:
+        text = request.text
+    else:
+        raise HTTPException(status_code=400, detail="Provide 'url' or 'text'")
 
     # Step 2 — Extract factual claims
     try:
@@ -91,7 +95,7 @@ async def analyze(request: AnalysisRequest):
 
     # Step 4 — Score credibility (LLM)
     try:
-        result = await score_credibility(text, checked_claims)
+        result = await score_credibility(text, checked_claims, source_url=request.url)
     except Exception as e:
         logger.error(f"Error scoring credibility: {e}")
         raise HTTPException(
